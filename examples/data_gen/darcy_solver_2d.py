@@ -67,6 +67,9 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6):
   # Apply square root laplace preconditioner to the solution.
   return apply_inverse_square_root_laplace(u)
 
+def _next_power_of_two(n):
+    return 1 if n <= 1 else 1 << (n - 1).bit_length()
+
 def apply_preconditioned_operator(a11, a12, a22, u):
   """Applies the Darcy operator, symmetrically preconditioned by the Laplacian. The coefficients a are
      assumed to already be extended to a large enough grid by the function extend_coefficients below.
@@ -89,8 +92,8 @@ def apply_preconditioned_operator(a11, a12, a22, u):
   # Evaluate the Fourier transform and extend to a large enough grid to allow multiplication.
   fft_u1 = np.fft.fft2(extended_grid_u1, norm='forward')
 
-  large_n = 6*n + 10
-  large_m = 6*m + 10
+  large_n = _next_power_of_two(4*n + 7)
+  large_m = _next_power_of_two(4*m + 7)
 
   fft_u1 = extend_fft(fft_u1, large_n, large_m)
 
@@ -137,7 +140,7 @@ def extend_coefficients(a, n, m):
   a_ext = extend_symmetrically(a)
   a_n, a_m = np.shape(a_ext)
 
-  # Set the frequency cutoff.
+  # Set the frequency cutoff. This is large enough to ensure exact multiplication by a product of Galerkin functions.
   n_large = 4 * n + 7
   m_large = 4 * m + 7
 
@@ -168,8 +171,8 @@ def extend_coefficients(a, n, m):
       if (i > 0) and (j > 0):
         out_fft[-i,-j] = out_fft[-i,-j] * a_transform[(-i) % a_n, (-j) % a_m]
 
-  # Extend the fft to a sufficiently large grid for multiplication.
-  out_fft = extend_fft(out_fft, 6 * n + 10, 6 * m + 10)
+  # Extend the fft to a grid of size a power of 2.
+  out_fft = extend_fft(out_fft, _next_power_of_two(n_large), _next_power_of_two(m_large))
 
   # Return a in real space.
   return np.real(np.fft.ifft2(out_fft, norm='forward'))

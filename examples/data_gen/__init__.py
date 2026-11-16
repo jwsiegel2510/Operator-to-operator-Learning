@@ -1,1 +1,5 @@
-from .darcy_solver_2d import uniform_grid_solver_scalar, uniform_grid_solver_tensor
+from .darcy_solver_2d import uniform_grid_solver_scalar
+from .darcy_solver_2d import uniform_grid_solver_tensor
+from .random_sampling import sample_gaussian_field
+from .random_sampling import sample_scalar_diffusion
+from .random_sampling import sample_piecewise_constant_scalar_diffusion

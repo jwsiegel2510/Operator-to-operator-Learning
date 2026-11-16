@@ -4,21 +4,18 @@
 
 import numpy as np
 from matplotlib import pyplot as plt
-from examples.data_gen import uniform_grid_solver_scalar
+from examples.data_gen import uniform_grid_solver_scalar, sample_gaussian_field, sample_scalar_diffusion, sample_piecewise_constant_scalar_diffusion
 
 if __name__ == '__main__':
   n, m = (256, 256)
-  f = np.ones((n, m))
-  # xf = np.linspace(1.0 / (n+2), 1.0 - 1.0 / (n+2), num=n)
-  # yf = np.linspace(1.0 / (m+2), 1.0 - 1.0 / (m+2), num=m)
-  # xa = np.linspace(0.0, 1.0, num=3*n)
-  # ya = np.linspace(0.0, 1.0, num=3*m)
-  a = np.ones((3*n, 3*m))
-  a[n:3*n, m:2*m] = 100
-  plt.imshow(f)
+  f = sample_gaussian_field(n, m, width=0.5)
+  a = sample_piecewise_constant_scalar_diffusion(3*n, 3*m)
+  plt.imshow(f, extent=[0,2*np.pi,0,2*np.pi])
   plt.show()
-  plt.imshow(a)
+  plt.imshow(np.log(a), extent=[0,2*np.pi,0,2*np.pi])
   plt.show()
-  u = uniform_grid_solver_scalar(a, f)
-  plt.imshow(u)
+
+  # Move to a 2pi x 2pi grid.
+  u = (2.0 * np.pi * 2.0 * np.pi) * uniform_grid_solver_scalar(a, f)
+  plt.imshow(u, extent=[0,2*np.pi,0,2*np.pi])
   plt.show()
