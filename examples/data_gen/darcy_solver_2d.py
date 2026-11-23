@@ -118,11 +118,69 @@ def project_fft(u_fft, n, m):
     return _resize_axis(_resize_axis(u_fft, n, 0, False), m, 1, False)
 
 
-def extend_coefficients(a, n, m):
-    """Project the bilinear coefficient interpolant and pad for exact products."""
+def _endpoint_hat_sine_moments(k, intervals, b):
+    """Integral of the left endpoint's linear hat against sin(pi*k*x)."""
+    # 1/(pi*k) * (1 - sinc(k/intervals)); use a series to avoid
+    # catastrophic cancellation for a low frequency on a fine coefficient grid.
+    safe = b.xp.where(k == 0, 1, k)
+    angle = pi * safe / intervals
+    series = angle / (6 * intervals) * (1 - angle**2 / 20 + angle**4 / 840)
+    direct = (1 - b.xp.sinc(safe / intervals)) / (pi * safe)
+    result = b.xp.where(abs(angle) < 0.1, series, direct)
+    return b.xp.where(k == 0, 0, result)
+
+
+def _odd_coefficient_spectrum(a, k, l, x_filter, y_filter, b):
+    """Exact Fourier projection of the odd-odd reflected bilinear field.
+
+    Nonzero boundary traces create jumps in an odd reflection. They cannot be
+    represented just by reflecting the interior samples: endpoint hat moments
+    supply the missing boundary-edge and corner terms below.
+    """
+    nx, ny = a.shape[0] - 1, a.shape[1] - 1
+    interior = extend_antisymmetrically(a[1:-1, 1:-1])
+    transform = b.fft(interior)
+    spectrum = transform[(k % (2*nx))[:, None], (l % (2*ny))[None, :]]
+    spectrum = spectrum * x_filter[:, None] * y_filter[None, :]
+
+    def edge_moments(values, frequencies, intervals, filter_values):
+        periodic = b.zeros((2*intervals,))
+        periodic[1:intervals] = values
+        periodic[intervals+1:] = -b.flip(values, 0)
+        transform = b.xp.fft.fft(periodic, norm="forward")
+        return (1j * transform[frequencies % (2*intervals)]).real * filter_values
+
+    k_real, l_real = (k.to(a.dtype), l.to(a.dtype)) if b.torch else (k, l)
+    ex = _endpoint_hat_sine_moments(k_real, nx, b)
+    ey = _endpoint_hat_sine_moments(l_real, ny, b)
+    rx = b.xp.where(k % 2 == 0, -1, 1)
+    ry = b.xp.where(l % 2 == 0, -1, 1)
+    # A period-two odd-odd Fourier coefficient is minus the integral of
+    # a(x,y)*sin(pi*k*x)*sin(pi*l*y) over the unit square.
+    for ix, sign in ((0, 1), (-1, rx)):
+        edge = edge_moments(a[ix, 1:-1], l, ny, y_filter)
+        spectrum = spectrum - (ex * sign)[:, None] * edge[None, :]
+    for iy, sign in ((0, 1), (-1, ry)):
+        edge = edge_moments(a[1:-1, iy], k, nx, x_filter)
+        spectrum = spectrum - edge[:, None] * (ey * sign)[None, :]
+    corners = (a[0, 0] + a[-1, 0]*rx[:, None]
+               + a[0, -1]*ry[None, :]
+               + a[-1, -1]*rx[:, None]*ry[None, :])
+    return spectrum - ex[:, None]*ey[None, :]*corners
+
+
+def extend_coefficients(a, n, m, *, parity="even"):
+    """Project the bilinear interpolant and pad for exact Galerkin products.
+
+    Diagonal diffusion entries use even reflection in both coordinates.
+    The cross entry uses odd reflection in both coordinates; this parity is
+    necessary to preserve its mixed-gradient bilinear form on the square.
+    """
+    if parity not in ("even", "odd"):
+        raise ValueError("parity must be 'even' or 'odd'")
     b = _Backend(a)
-    a_ext = extend_symmetrically(a)
-    an, am = a_ext.shape
+    a_ext = extend_symmetrically(a) if parity == "even" else None
+    an, am = (2*a.shape[0] - 2, 2*a.shape[1] - 2)
     ln, lm = 4*n + 7, 4*m + 7
     k, l = b.frequencies(ln), b.frequencies(lm)
     # The Fourier transform of a linear nodal hat is sinc(k / grid_size)^2.
@@ -130,8 +188,11 @@ def extend_coefficients(a, n, m):
     kx, ly = (k.to(a.dtype), l.to(a.dtype)) if b.torch else (k, l)
     x = b.xp.sinc(kx / an)**2
     y = b.xp.sinc(ly / am)**2
-    spectrum = b.fft(a_ext)[(k % an)[:, None], (l % am)[None, :]]
-    spectrum = spectrum * x[:, None] * y[None, :]
+    if parity == "odd":
+        spectrum = _odd_coefficient_spectrum(a, k, l, x, y, b)
+    else:
+        spectrum = b.fft(a_ext)[(k % an)[:, None], (l % am)[None, :]]
+        spectrum = spectrum * x[:, None] * y[None, :]
     spectrum = extend_fft(spectrum, _next_power_of_two(ln), _next_power_of_two(lm))
     return b.ifft(spectrum)
 
@@ -207,8 +268,9 @@ class _Operator:
 def apply_preconditioned_operator(a11, a12, a22, u):
     """Apply (-Delta)^(-1/2) [-div(A grad)] (-Delta)^(-1/2).
 
-    Coefficients must already be prepared by extend_coefficients. Solvers
-    reuse a plan internally; this standalone helper constructs a fresh plan.
+    Coefficients must already be prepared by extend_coefficients: use the
+    default even parity for a11/a22 and parity="odd" for a12. Solvers reuse a
+    plan internally; this standalone helper constructs a fresh plan.
     """
     return _Operator(a11, a12, a22, u)(u)
 
@@ -296,49 +358,56 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=1e-5, *, rtol=0.0,
             raise ValueError("maxiter must be a positive integer")
         aa = extend_coefficients(a11, n, m)
         cc = aa if scalar else extend_coefficients(a22, n, m)
-        ac = None if a12 is None else extend_coefficients(a12, n, m)
+        ac = None if a12 is None else extend_coefficients(a12, n, m, parity="odd")
         operator = _Operator(aa, ac, cc, f)
         rhs = operator.precondition(f)
-        u = b.zeros(f.shape)
-        r = rhs
-        p = r
-        rr = (r*r).mean()
-        initial = float(rr)**0.5
-        target = max(tol, rtol*initial)
-        residual = initial
-        iterations = 0
-        while residual > target and iterations < maxiter:
-            ap = operator(p)
-            denominator = (p*ap).mean()
-            # One host transfer for the CG scalars. FFTs, coefficient arrays,
-            # vectors and reductions otherwise remain on the selected device.
-            scalars = b.xp.stack((rr, denominator))
-            values = scalars.tolist()
-            if not all(np.isfinite(v) for v in values) or values[1] <= 0:
-                raise RuntimeError("CG breakdown: nonfinite residual or nonpositive curvature")
-            alpha = rr / denominator
-            u = u + alpha*p
-            r = r - alpha*ap
+        u, info = _conjugate_gradient(operator, rhs, tol, rtol, maxiter)
+        solution = operator.precondition(u)
+        return (solution, info) if return_info else solution
+
+
+def _conjugate_gradient(operator, rhs, tol, rtol, maxiter):
+    """Solve a prepared preconditioned system, reusing its spectral plan."""
+    b = _Backend(rhs)
+    u = b.zeros(rhs.shape)
+    r = rhs
+    p = r
+    rr = (r*r).mean()
+    initial = float(rr)**0.5
+    target = max(tol, rtol*initial)
+    residual = initial
+    iterations = 0
+    while residual > target and iterations < maxiter:
+        ap = operator(p)
+        denominator = (p*ap).mean()
+        # Transfer only small CG scalars to the host for breakdown checks.
+        # FFTs, coefficient arrays and vectors remain on the selected device.
+        scalars = b.xp.stack((rr, denominator))
+        values = scalars.tolist()
+        if not all(np.isfinite(v) for v in values) or values[1] <= 0:
+            raise RuntimeError("CG breakdown: nonfinite residual or nonpositive curvature")
+        alpha = rr / denominator
+        u = u + alpha*p
+        r = r - alpha*ap
+        rr_new = (r*r).mean()
+        residual = float(rr_new)**0.5
+        iterations += 1
+        if not np.isfinite(residual):
+            raise RuntimeError("CG residual became nonfinite")
+        if residual <= target:
+            # A recursively updated residual can drift in float32.
+            r = rhs - operator(u)
             rr_new = (r*r).mean()
             residual = float(rr_new)**0.5
-            iterations += 1
-            if not np.isfinite(residual):
-                raise RuntimeError("CG residual became nonfinite")
-            if residual <= target:
-                # A recursively updated residual can drift in float32.
-                r = rhs - operator(u)
-                rr_new = (r*r).mean()
-                residual = float(rr_new)**0.5
-                p = r
-            else:
-                p = r + (rr_new/rr)*p
-            rr = rr_new
-        if not np.isfinite(residual) or residual > target:
-            raise RuntimeError(f"CG did not converge in {maxiter} iterations (preconditioned residual RMS={residual:.3e}, target={target:.3e})")
-        solution = operator.precondition(u)
-        info = dict(iterations=iterations, residual_rms=residual,
-                    initial_residual_rms=initial, tolerance=target, converged=True)
-        return (solution, info) if return_info else solution
+            p = r
+        else:
+            p = r + (rr_new/rr)*p
+        rr = rr_new
+    if not np.isfinite(residual) or residual > target:
+        raise RuntimeError(f"CG did not converge in {maxiter} iterations (preconditioned residual RMS={residual:.3e}, target={target:.3e})")
+    info = dict(iterations=iterations, residual_rms=residual,
+                initial_residual_rms=initial, tolerance=target, converged=True)
+    return u, info
 
 
 if __name__ == "__main__":
