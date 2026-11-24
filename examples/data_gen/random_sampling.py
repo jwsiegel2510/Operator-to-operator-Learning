@@ -20,7 +20,7 @@ def sample_gaussian_field(n, m, width=0.1, variance = 1.0):
 def _next_power_of_two(n):
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
-def sample_scalar_diffusion(n, m, width_smooth=0.1, width_rough=0.1, variance = 1.0):
+def sample_scalar_diffusion(n, m, width_smooth=0.2, width_rough=0.1, variance = 0.5, spread=1.5):
   """Samples a random scalar diffusion field. The field jumps between two random fields depending
      upon another random field.
 
@@ -29,6 +29,7 @@ def sample_scalar_diffusion(n, m, width_smooth=0.1, width_rough=0.1, variance = 
     width_smooth: the width of the two random fields
     width_rough: the width of the switching field
     variance: the variance of the fields.
+    spread: different in baseline in both regions.
 
   returns:
     sample from the Gaussian field.
@@ -36,7 +37,7 @@ def sample_scalar_diffusion(n, m, width_smooth=0.1, width_rough=0.1, variance = 
   a_1 = sample_gaussian_field(n, m, width=width_smooth, variance = variance)
   a_2 = sample_gaussian_field(n, m, width=width_smooth, variance = variance)
   a_choice = sample_gaussian_field(n, m, width=width_rough, variance = 1.0)
-  return np.where(a_choice >= 0, np.exp(a_1 - variance), np.exp(a_2 + variance))
+  return np.where(a_choice >= 0, np.exp(a_1 - spread), np.exp(a_2 + spread))
 
 def sample_piecewise_constant_scalar_diffusion(n, m, width=0.1, variance = 4.0):
   """Samples a random scalar diffusion field. The field jumps between two values depending on a Gaussian field.
