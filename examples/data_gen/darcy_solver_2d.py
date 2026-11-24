@@ -21,9 +21,9 @@ def uniform_grid_solver_scalar(a, f, verbose=False, tol=10e-6, maxiter=None):
   returns:
     the solution (given on a grid of the same dimensions as f).
   """
-  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter, diagonal_diffusion=True)
+  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter, diagonal_diffusion=True, scalar_diffusion=True)
 
-def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None, diagonal_diffusion=False):
+def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None, diagonal_diffusion=False, scalar_diffusion=False):
   """Solves the Darcy equation with tensor diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -65,8 +65,14 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
   if maxiter is None:
     maxiter = min(10*n*m, 10000)
   a11 = extend_coefficients(a11, n, m)
-  a12 = extend_coefficients(a12, n, m, off_diag = True)
-  a22 = extend_coefficients(a22, n, m)
+  if diagonal_diffusion:
+    a12 = np.zeros_like(a11)
+  else:
+    a12 = extend_coefficients(a12, n, m, off_diag = True)
+  if scalar_diffusion:
+    a22 = a11
+  else:
+    a22 = extend_coefficients(a22, n, m)
 
   # Apply square root laplace preconditioner to f.
   f = apply_inverse_square_root_laplace(f)
