@@ -3,5 +3,3 @@ from .darcy_solver_2d import uniform_grid_solver_tensor
 from .random_sampling import sample_gaussian_field
 from .random_sampling import sample_scalar_diffusion
 from .random_sampling import sample_piecewise_constant_scalar_diffusion
-from .dirichlet_to_neumann import dirichlet_to_neumann_scalar
-from .dirichlet_to_neumann import dirichlet_to_neumann_tensor
