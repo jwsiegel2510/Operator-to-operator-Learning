@@ -1,5 +1,9 @@
 # Author: Jonathan Siegel
 """Sine Galerkin solvers for -div(A grad u) = f on (0, 1)^2, u = 0.
+=======
+#
+# Implements solvers for the 2d Darcy problem, and Dirichlet-Neumann map with tensor diffusion coefficient.
+# All calculations are performed on the unit square using a spectral method.
 
 NumPy inputs use the CPU by default. Pass device="cuda" to use PyTorch on
 an NVIDIA GPU, or supply PyTorch tensors to keep inputs and outputs on their
@@ -50,6 +54,47 @@ class _Backend:
         k = self.arange(n)
         return self.xp.where(k <= (n - 1) // 2, k, k - n)
 
+
+def dirichlet_to_neumann_map_tensor(a11, a12, a22, g, tol=10e-6):
+  """Implements to Dirichlet-Neumann map with tensor diffusion a, applied to boundary data g.
+     The input a is assumed to be given on a uniform grid on the square, and is obtained
+     from these values via piecewise bilinear interpolation. The boundary data g is given
+     by its values on a periodic grid, whose size should be divisible by 4 (corresponding to
+     the four sides of the square). The boundary data is obtained from these values via
+     cosine interpolation on each side. The first value of g is at the corner
+     of the square. The output is given via sin expansion on each side. Note that the pairing
+     between H^(1/2) and H^(-1/2) is not exactly given by the coefficient inner products in
+     this representation.
+
+  args:
+    a11, a12, a22: tensor diffusion coefficient
+    g: boundary data
+
+  returns:
+    the Neumann data for the solution (given on a grid of the same dimension as g). Interpreted
+    as a sin series interpolated on each side of the square.
+  """
+  # First extend the data g to the whole square and periodize. Note that the resulting function
+  # has zero Neumann data due to periodicity.
+  p = np.shape(g)
+  n = p // 4 + 1
+  g_ext = np.zeros((n, n))
+  g_ext[0,:-1] = g[:n-1]
+  g_ext[:-1,n] = g[n-1:2*(n-1)]
+  g_ext[n,-1:0:-1] = g[2*(n-1):3*(n-1)]
+  g_ext[-1:0:-1,0] = g[3*(n-1):4*(n-1)]
+  for i in range(1,n-1):
+    for j in range(1,n-1):
+      w1 = 1.0 / i
+      w2 = 1.0 / (n-i-1)
+      w3 = 1.0 / j
+      w4 = 1.0 / (n-j-1)
+      total = w1 + w2 + w3 + w4
+      g_ext[i,j] = (w1 * g_ext[0,j] + w2 * g_ext[n-1,j] + w3 * g_ext[i,0] + w4 * g_ext[i,n-1]) / total
+  g_ext = extend_symmetrically(g_ext)
+  
+  # Calculate the A-Laplace of g_ext and project onto the sin space.
+  
 
 def _next_power_of_two(n):
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
