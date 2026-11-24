@@ -5,7 +5,7 @@
 import numpy as np
 from math import sqrt
 
-def uniform_grid_solver_scalar(a, f):
+def uniform_grid_solver_scalar(a, f, verbose=False):
   """Solves the Darcy equation with scalar diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -18,9 +18,9 @@ def uniform_grid_solver_scalar(a, f):
   returns:
     the solution (given on a grid of the same dimensions as f).
   """
-  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f)
+  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, verbose=verbose)
 
-def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6):
+def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False):
   """Solves the Darcy equation with tensor diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -49,14 +49,15 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6):
   p = r
   iter = 1
   while (sqrt(np.mean(r * r)) >= tol):
-    print(iter)
     Ap = apply_preconditioned_operator(a11, a12, a22, p)
     alpha = np.mean(r * r) / np.mean (p * Ap)
     u = u + alpha * p
     r_new = r - alpha * Ap
     Ar = apply_preconditioned_operator(a11, a12, a22, r)
-    print(np.mean(p * Ar), np.mean(r * Ap))
-    print(np.mean(p * Ap))
+    if verbose:
+      print(iter)
+      print(np.mean(p * Ar), np.mean(r * Ap))
+      print(np.mean(p * Ap))
     if (sqrt(np.mean(r_new * r_new) < tol)):
       return apply_inverse_square_root_laplace(u)
     beta = np.mean(r_new * r_new) / np.mean(r * r)
