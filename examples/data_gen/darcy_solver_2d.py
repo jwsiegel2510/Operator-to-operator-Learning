@@ -42,11 +42,26 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
     the solution (given on a grid of the same dimensions as f).
 
   raises:
+    ValueError: if an input is nonfinite, has an unexpected shape, or the
+      diffusion tensor is not positive definite
     RuntimeError: if conjugate gradient breaks down or does not reach the tolerance
   """
   # Preprocess the diffusion coefficients a. Calculate their projections onto a large enough trigonometric
   # polynomial space and extend to a large enough grid to allow multiplication by elements of the Galerkin space.
+  if np.ndim(f) != 2 or min(np.shape(f)) < 1:
+    raise ValueError("f must be a nonempty 2D interior grid")
   n, m = np.shape(f)
+  if np.shape(a11) != np.shape(a22) or np.shape(a12) != np.shape(a11):
+    raise ValueError("Coefficient arrays must share a single 2D shape")
+  for name, a in (("a11", a11), ("a12", a12), ("a22", a22), ("f", f)):
+    if not np.all(np.isfinite(a)):
+      raise ValueError(f"{name} must be finite")
+  if np.any(a11 <= 0) or np.any(a22 <= 0):
+    raise ValueError("The diagonal of the diffusion tensor must be positive")
+  if np.any(a11 * a22 - a12 * a12 <= 0):
+    raise ValueError("The diffusion tensor must be positive definite")
+  if not np.isfinite(tol) or tol <= 0:
+    raise ValueError("tol must be a positive finite number")
   if maxiter is None:
     maxiter = min(10*n*m, 10000)
   a11 = extend_coefficients(a11, n, m)
