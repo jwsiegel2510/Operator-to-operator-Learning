@@ -8,7 +8,7 @@ from examples.data_gen import uniform_grid_solver_scalar, sample_gaussian_field,
 
 if __name__ == '__main__':
   n, m = (256, 256)
-  a = sample_piecewise_constant_scalar_diffusion(3*n, 3*m)
+  a = sample_scalar_diffusion(3*n, 3*m)
   plt.imshow(np.log(a), extent=[0,2*np.pi,0,2*np.pi])
   plt.colorbar()
   plt.show()

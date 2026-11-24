@@ -21,9 +21,9 @@ def uniform_grid_solver_scalar(a, f, verbose=False, tol=10e-6, maxiter=None):
   returns:
     the solution (given on a grid of the same dimensions as f).
   """
-  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter)
+  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter, diagonal_diffusion=True)
 
-def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None):
+def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None, diagonal_diffusion=False):
   """Solves the Darcy equation with tensor diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -90,7 +90,7 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
     if not np.isfinite(rr_new):
       raise RuntimeError("CG residual became nonfinite")
     if verbose:
-      Ar = apply_preconditioned_operator(a11, a12, a22, r)
+      Ar = apply_preconditioned_operator(a11, a12, a22, r, diagonal_diffusion=diagonal_diffusion)
       print(iter)
       print(np.mean(p * Ar), np.mean(r * Ap))
       print(np.mean(p * Ap))
@@ -107,13 +107,14 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
 def _next_power_of_two(n):
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
-def apply_preconditioned_operator(a11, a12, a22, u):
+def apply_preconditioned_operator(a11, a12, a22, u, diagonal_diffusion=False):
   """Applies the Darcy operator, symmetrically preconditioned by the Laplacian. The coefficients a are
      assumed to already be extended to a large enough grid by the function extend_coefficients below.
 
   args:
     a11, a12, a22: tensor diffusion coefficient
     u: iterate
+    diagonal_diffusion: tells whether the off-diagonal terms are zero (and their multiplications can be saved)
 
   returns:
     next iterate
@@ -142,8 +143,12 @@ def apply_preconditioned_operator(a11, a12, a22, u):
   grad_u1_y = np.real(np.fft.ifft2(fft_u1 * facty, norm='forward'))
 
   # Multiply the gradients with the coefficients a in real space.
-  out_grad_u1_x = a11 * grad_u1_x + a12 * grad_u1_y 
-  out_grad_u1_y = a12 * grad_u1_x + a22 * grad_u1_y
+  if diagonal_diffusion:
+    out_grad_u1_x = a11 * grad_u1_x 
+    out_grad_u1_y = a22 * grad_u1_y
+  else:
+    out_grad_u1_x = a11 * grad_u1_x + a12 * grad_u1_y 
+    out_grad_u1_y = a12 * grad_u1_x + a22 * grad_u1_y
   
   # Return to Fourier space and calculate the negative divergence.
   new_fft_x = np.fft.fft2(out_grad_u1_x, norm='forward')
