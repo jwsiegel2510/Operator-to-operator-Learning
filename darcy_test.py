@@ -8,14 +8,18 @@ from examples.data_gen import uniform_grid_solver_scalar, sample_gaussian_field,
 
 if __name__ == '__main__':
   n, m = (256, 256)
-  f = sample_gaussian_field(n, m, width=0.5)
   a = sample_piecewise_constant_scalar_diffusion(3*n, 3*m)
-  plt.imshow(f, extent=[0,2*np.pi,0,2*np.pi])
-  plt.show()
   plt.imshow(np.log(a), extent=[0,2*np.pi,0,2*np.pi])
+  plt.colorbar()
   plt.show()
+  for i in range(4):
+    f = 2.0 * sample_gaussian_field(n, m, width=0.4)
+    plt.imshow(f, extent=[0,2*np.pi,0,2*np.pi])
+    plt.colorbar()
+    plt.show()
 
-  # Move to a 2pi x 2pi grid.
-  u = (2.0 * np.pi * 2.0 * np.pi) * uniform_grid_solver_scalar(a, f)
-  plt.imshow(u, extent=[0,2*np.pi,0,2*np.pi])
-  plt.show()
+    # Move to a 2pi x 2pi grid.
+    u = (2.0 * np.pi * 2.0 * np.pi) * uniform_grid_solver_scalar(a, f)
+    plt.imshow(u, extent=[0,2*np.pi,0,2*np.pi])
+    plt.colorbar()
+    plt.show()
