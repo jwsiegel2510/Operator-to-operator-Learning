@@ -5,7 +5,7 @@
 import numpy as np
 from math import sqrt
 
-def uniform_grid_solver_scalar(a, f, verbose=False):
+def uniform_grid_solver_scalar(a, f, verbose=False, tol=10e-6, maxiter=None):
   """Solves the Darcy equation with scalar diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -14,13 +14,16 @@ def uniform_grid_solver_scalar(a, f, verbose=False):
   args:
     a: scalar diffusion coefficient
     f: forcing term
+    verbose: print per-iteration conjugate gradient diagnostics
+    tol: relative tolerance on the RMS of the preconditioned residual
+    maxiter: conjugate gradient iteration limit
 
   returns:
     the solution (given on a grid of the same dimensions as f).
   """
-  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, verbose=verbose)
+  return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter)
 
-def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False):
+def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None):
   """Solves the Darcy equation with tensor diffusion a and forcing term f with zero boundary conditions.
      The inputs a and f are assumed to be given on a uniform grid on the square. f is taken to be a 
      trigonometric sin polynomial given by its values at a uniform grid, and a is given by its values
@@ -29,13 +32,23 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False):
   args:
     a11, a12, a22: tensor diffusion coefficient
     f: forcing term
+    tol: relative tolerance on the RMS of the preconditioned residual, measured
+         against its initial value, so that the result does not depend on the
+         scaling of f
+    verbose: print per-iteration conjugate gradient diagnostics
+    maxiter: conjugate gradient iteration limit; defaults to 10*n*m capped at 10000
 
   returns:
     the solution (given on a grid of the same dimensions as f).
+
+  raises:
+    RuntimeError: if conjugate gradient breaks down or does not reach the tolerance
   """
   # Preprocess the diffusion coefficients a. Calculate their projections onto a large enough trigonometric
   # polynomial space and extend to a large enough grid to allow multiplication by elements of the Galerkin space.
   n, m = np.shape(f)
+  if maxiter is None:
+    maxiter = min(10*n*m, 10000)
   a11 = extend_coefficients(a11, n, m)
   a12 = extend_coefficients(a12, n, m, off_diag = True)
   a22 = extend_coefficients(a22, n, m)
@@ -47,23 +60,31 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False):
   u = np.zeros_like(f)
   r = f
   p = r
+  rr = np.mean(r * r)
+  target = tol * sqrt(rr)
   iter = 1
-  while (sqrt(np.mean(r * r)) >= tol):
+  while (sqrt(rr) > target and iter <= maxiter):
     Ap = apply_preconditioned_operator(a11, a12, a22, p)
-    alpha = np.mean(r * r) / np.mean (p * Ap)
+    denominator = np.mean(p * Ap)
+    if not np.isfinite(denominator) or denominator <= 0:
+      raise RuntimeError("CG breakdown: nonfinite residual or nonpositive curvature")
+    alpha = rr / denominator
     u = u + alpha * p
     r_new = r - alpha * Ap
-    Ar = apply_preconditioned_operator(a11, a12, a22, r)
+    rr_new = np.mean(r_new * r_new)
+    if not np.isfinite(rr_new):
+      raise RuntimeError("CG residual became nonfinite")
     if verbose:
+      Ar = apply_preconditioned_operator(a11, a12, a22, r)
       print(iter)
       print(np.mean(p * Ar), np.mean(r * Ap))
       print(np.mean(p * Ap))
-    if (sqrt(np.mean(r_new * r_new) < tol)):
-      return apply_inverse_square_root_laplace(u)
-    beta = np.mean(r_new * r_new) / np.mean(r * r)
     r = r_new
-    p = r + beta * p
+    p = r + (rr_new / rr) * p
+    rr = rr_new
     iter = iter + 1
+  if sqrt(rr) > target:
+    raise RuntimeError(f"CG did not converge in {maxiter} iterations (preconditioned residual RMS={sqrt(rr):.3e}, target={target:.3e})")
 
   # Apply square root laplace preconditioner to the solution.
   return apply_inverse_square_root_laplace(u)
