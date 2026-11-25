@@ -10,6 +10,13 @@ from examples.data_gen.data_generation_darcy import generate_dataset
 
 
 class TestDarcyBatch(unittest.TestCase):
+    def test_scalar_fft_padding(self):
+        a = np.ones((4, 4))
+        for grid, expected in [((126, 128), (512, 540)), ((256, 7), (1080, 36))]:
+            with self.subTest(grid=grid):
+                prepared = solver.prepare_scalar_coefficient(a, grid)
+                self.assertEqual(prepared.values.shape, expected)
+
     def check_solver(self, device):
         rng = np.random.default_rng(17)
         n, m = 6, 7

@@ -52,7 +52,7 @@ def prepare_scalar_coefficient(a, grid_shape, *, device="cpu"):
     raise ValueError("a needs at least two nodes per axis and the interior grid must be nonempty")
   if not bool(xp.all(xp.isfinite(a) & (a > 0))):
     raise ValueError("Scalar diffusion coefficients must be finite and positive")
-  values = extend_coefficients(a, n, m, xp=xp)
+  values = extend_coefficients(a, n, m, xp=xp, round_length=_next_even_fft_length)
   kx = xp.arange(1, n+1, dtype=xp.float64)[:, None]
   ky = xp.arange(1, m+1, dtype=xp.float64)[None, :]
   radius = xp.hypot(kx, ky)
@@ -77,7 +77,7 @@ def _apply_scalar_modes(prepared, modes):
   n, m = modes.shape[-2:]
   result = xp.zeros_like(modes)
   # The two gradient multipliers are i*kx/|k| and i*ky/|k|. Multiply by
-  # the projected coefficient on the same enlarged grid as the tensor solver.
+  # the projected coefficient on a grid covering the Galerkin cutoff.
   for weight, even_x in ((prepared.grad_x, True), (prepared.grad_y, False)):
     flux = _modes_to_grid(1j * weight * modes, prepared.values.shape, xp, even_x=even_x)
     flux *= prepared.values
@@ -231,6 +231,18 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
 def _next_power_of_two(n):
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
+def _next_even_fft_length(minimum):
+  """Smallest even length >= minimum with only 2, 3 and 5 as prime factors."""
+  length = max(2, minimum + minimum % 2)
+  while True:
+    remainder = length
+    for factor in (2, 3, 5):
+      while remainder % factor == 0:
+        remainder //= factor
+    if remainder == 1:
+      return length
+    length += 2
+
 def apply_preconditioned_operator(a11, a12, a22, u, diagonal_diffusion=False):
   """Applies the Darcy operator, symmetrically preconditioned by the Laplacian. The coefficients a are
      assumed to already be extended to a large enough grid by the function extend_coefficients below.
@@ -289,7 +301,7 @@ def apply_preconditioned_operator(a11, a12, a22, u, diagonal_diffusion=False):
   # Apply other half of Laplace preconditioner.
   return apply_inverse_square_root_laplace(out_u)
 
-def extend_coefficients(a, n, m, off_diag=False, *, xp=np):
+def extend_coefficients(a, n, m, off_diag=False, *, xp=np, round_length=_next_power_of_two):
   """Project a piecewise bilinear coefficient onto the padded product grid."""
   if off_diag:
     extended = extend_antisymmetrically(a[1:-1, 1:-1], xp=xp)
@@ -302,7 +314,7 @@ def extend_coefficients(a, n, m, off_diag=False, *, xp=np):
   kx = xp.arange(-2*n - 3, 2*n + 4)[:, None]
   ky = xp.arange(-2*m - 3, 2*m + 4)[None, :]
   weights = xp.sinc(kx / ax)**2 * xp.sinc(ky / ay)**2
-  shape = (_next_power_of_two(4*n + 7), _next_power_of_two(4*m + 7))
+  shape = (round_length(4*n + 7), round_length(4*m + 7))
   spectrum = xp.zeros(shape, dtype=xp.complex128)
   spectrum[kx, ky] = weights * transform[kx % ax, ky % ay]
   return xp.ascontiguousarray(xp.fft.ifft2(spectrum, norm="forward").real)
