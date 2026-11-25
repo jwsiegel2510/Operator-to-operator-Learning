@@ -2,6 +2,8 @@
 #
 # Generates random diffusion coefficients and RHS for the darcy equation and for the Calderon problem.
 
+from functools import lru_cache
+
 import numpy as np
 
 def sample_gaussian_field(n, m, width=0.1, variance = 1.0):
@@ -54,6 +56,55 @@ def sample_piecewise_constant_scalar_diffusion(n, m, width=0.1, variance = 4.0):
   return np.where(a_choice >= 0, np.exp(-1.0 * variance), np.exp(variance))
 
 
+# A Darcy run uses three covariance configurations: two for a and one for f.
+# Bound the number of resident spectra when a notebook switches grid sizes.
+@lru_cache(maxsize=3)
+def _gaussian_sqrt_spectrum(nx, ny, dx, dy, ell_x, ell_y, variance, max_embedding_attempts):
+    """Prepare the deterministic FFT filter. Random draws never enter the cache."""
+    if nx < 1 or ny < 1:
+        raise ValueError("nx and ny must be positive.")
+    if variance < 0:
+        raise ValueError("variance must be nonnegative.")
+
+    if ell_x <= 0 or ell_y <= 0:
+        raise ValueError("Length scales must be positive.")
+
+    # Embedding dimensions must be large enough that every displacement
+    # within the requested grid appears without periodic wrap-around.
+    mx = _next_power_of_two(max(1, 2 * (nx - 1)))
+    my = _next_power_of_two(max(1, 2 * (ny - 1)))
+
+    for _ in range(max_embedding_attempts):
+        # Wrapped displacements on the embedding grid.
+        ix = np.minimum(np.arange(mx), mx - np.arange(mx))
+        iy = np.minimum(np.arange(my), my - np.arange(my))
+
+        rx = dx * ix[:, None]
+        ry = dy * iy[None, :]
+
+        # First row/column of the block-circulant covariance matrix.
+        covariance_lags = variance * np.exp(
+            -0.5 * ((rx / ell_x) ** 2 + (ry / ell_y) ** 2)
+        )
+
+        # Eigenvalues of the circulant covariance matrix.
+        eigenvalues = np.fft.fft2(covariance_lags).real
+
+        scale = max(np.max(eigenvalues), 1.0)
+        tolerance = 1e-12 * scale
+
+        if np.min(eigenvalues) >= -tolerance:
+            return np.sqrt(np.maximum(eigenvalues, 0.0))
+
+        # A larger embedding often removes negative eigenvalues.
+        mx *= 2
+        my *= 2
+    raise RuntimeError(
+        "Could not find a positive-semidefinite circulant embedding. "
+        "Try increasing max_embedding_attempts."
+    )
+
+
 def sample_gaussian_gp_fft(
     nx,
     ny,
@@ -86,54 +137,11 @@ def sample_gaussian_gp_fft(
     samples : ndarray, shape (n_samples, nx, ny)
         GP samples evaluated on the regular grid.
     """
-    if nx < 1 or ny < 1:
-        raise ValueError("nx and ny must be positive.")
-    if variance < 0:
-        raise ValueError("variance must be nonnegative.")
-
     ell_x, ell_y = length_scale
-    if ell_x <= 0 or ell_y <= 0:
-        raise ValueError("Length scales must be positive.")
-
-    # Embedding dimensions must be large enough that every displacement
-    # within the requested grid appears without periodic wrap-around.
-    mx = _next_power_of_two(max(1, 2 * (nx - 1)))
-    my = _next_power_of_two(max(1, 2 * (ny - 1)))
-
-    eigenvalues = None
-
-    for _ in range(max_embedding_attempts):
-        # Wrapped displacements on the embedding grid.
-        ix = np.minimum(np.arange(mx), mx - np.arange(mx))
-        iy = np.minimum(np.arange(my), my - np.arange(my))
-
-        rx = dx * ix[:, None]
-        ry = dy * iy[None, :]
-
-        # First row/column of the block-circulant covariance matrix.
-        covariance_lags = variance * np.exp(
-            -0.5 * ((rx / ell_x) ** 2 + (ry / ell_y) ** 2)
-        )
-
-        # Eigenvalues of the circulant covariance matrix.
-        eigenvalues = np.fft.fft2(covariance_lags).real
-
-        scale = max(np.max(eigenvalues), 1.0)
-        tolerance = 1e-12 * scale
-
-        if np.min(eigenvalues) >= -tolerance:
-            eigenvalues = np.maximum(eigenvalues, 0.0)
-            break
-
-        # A larger embedding often removes negative eigenvalues.
-        mx *= 2
-        my *= 2
-    else:
-        raise RuntimeError(
-            "Could not find a positive-semidefinite circulant embedding. "
-            "Try increasing max_embedding_attempts."
-        )
-
+    sqrt_spectrum = _gaussian_sqrt_spectrum(
+        nx, ny, dx, dy, ell_x, ell_y, variance, max_embedding_attempts
+    )
+    mx, my = sqrt_spectrum.shape
     rng = np.random.default_rng(seed)
 
     # Filtering real white noise by sqrt of the covariance spectrum produces
@@ -141,7 +149,7 @@ def sample_gaussian_gp_fft(
     white_noise = rng.standard_normal((n_samples, mx, my))
 
     spectrum = np.fft.fft2(white_noise, axes=(-2, -1))
-    spectrum *= np.sqrt(eigenvalues)[None, :, :]
+    spectrum *= sqrt_spectrum
 
     embedded_samples = np.fft.ifft2(
         spectrum,
