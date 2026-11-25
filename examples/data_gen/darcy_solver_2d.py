@@ -2,6 +2,8 @@
 #
 # Implements solvers for the 2d darcy problem with tensor diffusion coefficient.
 
+from collections import namedtuple
+
 import numpy as np
 from math import sqrt
 
@@ -22,6 +24,122 @@ def uniform_grid_solver_scalar(a, f, verbose=False, tol=10e-6, maxiter=None):
     the solution (given on a grid of the same dimensions as f).
   """
   return uniform_grid_solver_tensor(a, np.zeros_like(a), a, f, tol, verbose=verbose, maxiter=maxiter, diagonal_diffusion=True, scalar_diffusion=True)
+
+# All arrays in a prepared coefficient live on the selected device and are
+# reused across batches of forcing fields for this operator.
+_PreparedScalarCoefficient = namedtuple(
+    "_PreparedScalarCoefficient", "xp values inverse_laplace_root grad_x grad_y"
+)
+
+
+def prepare_scalar_coefficient(a, grid_shape, *, device="cpu"):
+  """Prepare a positive nodal coefficient for an (n, m) interior solution grid."""
+  if device == "cpu":
+    xp = np
+  elif device == "cuda":
+    try:
+      import cupy as xp
+    except ImportError as exc:
+      raise RuntimeError("CUDA solves require CuPy matching the installed CUDA toolkit") from exc
+    if not xp.is_available():
+      raise RuntimeError("CuPy could not find an available CUDA device")
+  else:
+    raise ValueError("device must be 'cpu' or 'cuda'")
+
+  n, m = grid_shape
+  a = xp.asarray(a, dtype=xp.float64)
+  if a.ndim != 2 or min(a.shape) < 2 or min(n, m) < 1:
+    raise ValueError("a needs at least two nodes per axis and the interior grid must be nonempty")
+  if not bool(xp.all(xp.isfinite(a) & (a > 0))):
+    raise ValueError("Scalar diffusion coefficients must be finite and positive")
+  values = extend_coefficients(a, n, m, xp=xp)
+  kx = xp.arange(1, n+1, dtype=xp.float64)[:, None]
+  ky = xp.arange(1, m+1, dtype=xp.float64)[None, :]
+  radius = xp.hypot(kx, ky)
+  return _PreparedScalarCoefficient(xp, values, 1 / (np.pi * radius), kx / radius, ky / radius)
+
+
+def _modes_to_grid(modes, shape, xp, *, even_x=False):
+  """Invert the positive sine modes, or the corresponding gradient modes."""
+  n, m = modes.shape[-2:]
+  # rfft2 stores only nonnegative y frequencies. Reflection in x is odd
+  # for a sine series, and even after taking its x derivative.
+  spectrum = xp.zeros((*modes.shape[:-2], shape[0], shape[1]//2 + 1), dtype=xp.complex128)
+  spectrum[..., 1:n+1, 1:m+1] = modes
+  reflected = modes[..., ::-1, :]
+  spectrum[..., -n:, 1:m+1] = reflected if even_x else -reflected
+  return xp.fft.irfft2(spectrum, s=shape, axes=(-2, -1), norm="forward")
+
+
+def _apply_scalar_modes(prepared, modes):
+  """Apply G* a G in sine space, where G = grad(-Δ)^(-1/2)."""
+  xp = prepared.xp
+  n, m = modes.shape[-2:]
+  result = xp.zeros_like(modes)
+  # The two gradient multipliers are i*kx/|k| and i*ky/|k|. Multiply by
+  # the projected coefficient on the same enlarged grid as the tensor solver.
+  for weight, even_x in ((prepared.grad_x, True), (prepared.grad_y, False)):
+    flux = _modes_to_grid(1j * weight * modes, prepared.values.shape, xp, even_x=even_x)
+    flux *= prepared.values
+    flux_modes = xp.fft.rfft2(flux, axes=(-2, -1), norm="forward")
+    result += weight * flux_modes[..., 1:n+1, 1:m+1].imag
+  return result
+
+
+def uniform_grid_solver_scalar_batch(prepared, f, tol=1e-5, maxiter=None):
+  """Solve f[batch, n, m] in float64 on the prepared coefficient's device.
+
+  Returns a NumPy (CPU) or CuPy (CUDA) array. Each pair has its own relative
+  preconditioned RMS residual target and the same iteration limit as the
+  single-forcing solver. Zero forcings give zero solutions.
+  """
+  xp = prepared.xp
+  f = xp.asarray(f, dtype=xp.float64)
+  if f.ndim != 3 or f.shape[0] == 0 or f.shape[-2:] != prepared.grad_x.shape:
+    raise ValueError("f must contain a nonempty batch on the prepared interior grid")
+  if not bool(xp.all(xp.isfinite(f))):
+    raise ValueError("f must be finite")
+  if not np.isfinite(tol) or tol <= 0:
+    raise ValueError("tol must be a positive finite number")
+  _, n, m = f.shape
+  if maxiter is None:
+    maxiter = min(10*n*m, 10000)
+
+  extended = extend_antisymmetrically(f, xp=xp)
+  spectrum = xp.fft.rfft2(extended, axes=(-2, -1), norm="forward")
+  residual = spectrum[..., 1:n+1, 1:m+1].real * prepared.inverse_laplace_root
+  del extended, spectrum
+  solution = xp.zeros_like(residual)
+  direction = residual.copy()
+  # By Parseval, the spatial and sine-mode squared norms differ by a
+  # constant that cancels in each RHS's relative convergence criterion.
+  rr = xp.sum(residual * residual, axis=(-2, -1), keepdims=True)
+  target = tol**2 * rr
+  active = rr > target
+
+  for _ in range(maxiter):
+    if not bool(active.any()):
+      break
+    applied = _apply_scalar_modes(prepared, direction)
+    curvature = xp.sum(direction * applied, axis=(-2, -1), keepdims=True)
+    # A bad active system propagates NaN to the final convergence check.
+    # Inactive systems take a zero step and never divide by zero.
+    curvature = xp.where((curvature > 0) & xp.isfinite(curvature), curvature, xp.nan)
+    step = xp.where(active, rr, 0) / xp.where(active, curvature, 1)
+    solution += step * direction
+    residual -= step * applied
+    rr_new = xp.sum(residual * residual, axis=(-2, -1), keepdims=True)
+    active = rr_new > target
+    beta = xp.where(active, rr_new, 0) / xp.where(active, rr, 1)
+    direction = xp.where(active, residual + beta * direction, 0)
+    rr = rr_new
+
+  if not bool(xp.all(xp.isfinite(rr) & (rr <= target))):
+    raise RuntimeError(f"Scalar Darcy CG broke down or did not converge in {maxiter} iterations")
+  values = _modes_to_grid(solution * prepared.inverse_laplace_root,
+                          (2*n + 2, 2*m + 2), xp)
+  return values[..., 1:n+1, 1:m+1]
+
 
 def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxiter=None, diagonal_diffusion=False, scalar_diffusion=False):
   """Solves the Darcy equation with tensor diffusion a and forcing term f with zero boundary conditions.
@@ -85,7 +203,7 @@ def uniform_grid_solver_tensor(a11, a12, a22, f, tol=10e-6, verbose=False, maxit
   target = tol * sqrt(rr)
   iter = 1
   while (sqrt(rr) > target and iter <= maxiter):
-    Ap = apply_preconditioned_operator(a11, a12, a22, p)
+    Ap = apply_preconditioned_operator(a11, a12, a22, p, diagonal_diffusion=diagonal_diffusion)
     denominator = np.mean(p * Ap)
     if not np.isfinite(denominator) or denominator <= 0:
       raise RuntimeError("CG breakdown: nonfinite residual or nonpositive curvature")
@@ -171,101 +289,42 @@ def apply_preconditioned_operator(a11, a12, a22, u, diagonal_diffusion=False):
   # Apply other half of Laplace preconditioner.
   return apply_inverse_square_root_laplace(out_u)
 
-def extend_coefficients(a, n, m, off_diag = False):
-  """Given input coefficients which are piecewise bilinear on a given grid, calculates the
-     projection of these coefficients onto a large enough trigonometric polynomial space
-     to ensure that the corresponding bilinear form is preserved on the sin Galerkin space.
-     Then, extends this to a large enough grid to enable correct multiplication with an
-     element of the sin Galerkin space. Off diagonal entries must be handled differently,
-     namely they must be extended antisymmetrically.
-
-  args:
-    a: input
-    n, m: size of the solution grid.
-
-  returns:
-    extended coefficient a in real space.
-  """
-  a_ext = extend_symmetrically(a)
+def extend_coefficients(a, n, m, off_diag=False, *, xp=np):
+  """Project a piecewise bilinear coefficient onto the padded product grid."""
   if off_diag:
-    a_ext = extend_antisymmetrically(a[1:-1,1:-1])
-  a_n, a_m = np.shape(a_ext)
+    extended = extend_antisymmetrically(a[1:-1, 1:-1], xp=xp)
+  else:
+    extended = extend_symmetrically(a, xp=xp)
+  ax, ay = extended.shape
+  transform = xp.fft.fft2(extended, norm="forward")
+  # Fourier multiplier of the bilinear nodal basis, through the original
+  # Galerkin cutoff of 2*n+3 and 2*m+3 on each side of zero.
+  kx = xp.arange(-2*n - 3, 2*n + 4)[:, None]
+  ky = xp.arange(-2*m - 3, 2*m + 4)[None, :]
+  weights = xp.sinc(kx / ax)**2 * xp.sinc(ky / ay)**2
+  shape = (_next_power_of_two(4*n + 7), _next_power_of_two(4*m + 7))
+  spectrum = xp.zeros(shape, dtype=xp.complex128)
+  spectrum[kx, ky] = weights * transform[kx % ax, ky % ay]
+  return xp.ascontiguousarray(xp.fft.ifft2(spectrum, norm="forward").real)
 
-  # Set the frequency cutoff. This is large enough to ensure exact multiplication by a product of Galerkin functions.
-  n_large = 4 * n + 7
-  m_large = 4 * m + 7
 
-  # Construct Fourier coefficients of the bilinear nodal function.
-  x_ind = np.minimum(np.arange(n_large), np.arange(n_large,0,-1)) * np.where(np.arange(n_large) > np.arange(n_large,0,-1), -1.0, 1.0)
-  y_ind = np.minimum(np.arange(m_large), np.arange(m_large,0,-1)) * np.where(np.arange(m_large) > np.arange(m_large,0,-1), -1.0, 1.0)
+def extend_symmetrically(a, *, xp=np):
+  """Reflect the coefficient evenly about both boundary axes."""
+  a = xp.asarray(a, dtype=xp.float64)
+  reflected = xp.concatenate((a, a[-2:0:-1, :]), axis=0)
+  return xp.concatenate((reflected, reflected[:, -2:0:-1]), axis=1)
 
-  x_fact = np.zeros_like(x_ind, dtype=complex)
-  x_fact[0] = 1.0
-  x_fact[1:] = a_n * a_n * (1.0 / (np.pi * np.pi * x_ind[1:] * x_ind[1:])) * np.sin(np.pi * (x_ind[1:] / a_n)) * np.sin(np.pi * (x_ind[1:] / a_n))
 
-  y_fact = np.zeros_like(y_ind, dtype=complex)
-  y_fact[0] = 1.0
-  y_fact[1:] = a_m * a_m * (1.0 / (np.pi * np.pi * y_ind[1:] * y_ind[1:])) * np.sin(np.pi * (y_ind[1:] / a_m)) * np.sin(np.pi * (y_ind[1:] / a_m))
+def extend_antisymmetrically(u, *, xp=np):
+  """Reflect the last two axes oddly across the zero Dirichlet boundaries."""
+  n, m = u.shape[-2:]
+  extended = xp.zeros((*u.shape[:-2], 2*n + 2, 2*m + 2), dtype=xp.float64)
+  extended[..., 1:n+1, 1:m+1] = u
+  extended[..., n+2:, 1:m+1] = -u[..., ::-1, :]
+  extended[..., 1:n+1, m+2:] = -u[..., :, ::-1]
+  extended[..., n+2:, m+2:] = u[..., ::-1, ::-1]
+  return extended
 
-  x_comp, y_comp = np.meshgrid(x_fact, y_fact, indexing='ij')
-  out_fft = x_comp * y_comp
-
-  # Multiply the nodal_fft by the transform of a.
-  a_transform = np.fft.fft2(a_ext, norm='forward')
-  for i in range(n_large // 2 + 1):
-    for j in range(m_large // 2 + 1):
-      out_fft[i,j] = out_fft[i,j] * a_transform[i % a_n, j % a_m]
-      if i > 0:
-        out_fft[-i,j] = out_fft[-i,j] * a_transform[(-i) % a_n, j % a_m]
-      if j > 0: 
-        out_fft[i,-j] = out_fft[i,-j] * a_transform[i % a_n, (-j) % a_m]
-      if (i > 0) and (j > 0):
-        out_fft[-i,-j] = out_fft[-i,-j] * a_transform[(-i) % a_n, (-j) % a_m]
-
-  # Extend the fft to a grid of size a power of 2.
-  out_fft = extend_fft(out_fft, _next_power_of_two(n_large), _next_power_of_two(m_large))
-
-  # Return a in real space.
-  return np.real(np.fft.ifft2(out_fft, norm='forward'))
-
-def extend_symmetrically(a):
-  """Extends the input symmetrically and periodically.
-
-  args:
-    a: input
-
-  returns:
-    extended input
-  """
-  n, m = np.shape(a)
-  extended_a = np.zeros((2*n - 2, 2*m - 2))
-  extended_a[0:n, 0:m] = a
-  extended_a[0:n, m:2*m - 2] = a[:, -2:0:-1]
-  extended_a[n:2*n-2, 0:m] = a[-2:0:-1, :]
-  extended_a[n:2*n-2, m:2*m - 2] = a[-2:0:-1, -2:0:-1]
-
-  return extended_a
-
-def extend_antisymmetrically(u):
-  """Extends the input antisymmetrically periodically with zero boundary conditions.
-
-  args:
-    u: input
-
-  returns:
-    extended input
-  """
-  n, m = np.shape(u)
-  extended_u = np.zeros((2*n+2, 2*m+2))
-  extended_u[1:n+1, 1:m+1] = u
-  extended_u[n+2:2*n+2, 1:m+1] = -1.0 * u[::-1 ,:]
-  extended_u[1:n+1, m+2:2*m+2] = -1.0 * u[:, ::-1]
-  extended_u[n+2:2*n+2, m+2:2*m+2] = u[::-1, ::-1]
-
-  # print(extended_u)
-  # print(np.fft.fft2(extended_u))
-
-  return extended_u
 
 def extend_fft(u_fft, n, m):
   """Given the Fourier transform of a function u, extends this to a larger grid with sizes n x m.
