@@ -419,5 +419,4 @@ if __name__ == '__main__':
   f = np.ones((n, m))
   a = np.ones((3*n, 3*m))
   a[n:2*n, m:2*m] = 100
-  print(extend_coefficients(a, n, m, off_diag=True))
   u = uniform_grid_solver_scalar(a, f)
