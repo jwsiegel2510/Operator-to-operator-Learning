@@ -194,6 +194,11 @@ def apply_preconditioned_operator(a11, a12, a22, u, diagonal_diffusion=False):
   # Apply other half of Laplace preconditioner.
   return apply_inverse_square_root_laplace(out_u)
 
+def _signed_frequencies(n):
+    """Integer frequencies in FFT order: 0, 1, ..., -2, -1."""
+    k = np.arange(n)
+    return np.where(k <= (n - 1) // 2, k, k - n)
+
 def extend_coefficients(a, n, m, off_diag = False):
   """Given input coefficients which are piecewise bilinear on a given grid, calculates the
      projection of these coefficients onto a large enough trigonometric polynomial space
@@ -233,17 +238,17 @@ def extend_coefficients(a, n, m, off_diag = False):
   x_comp, y_comp = np.meshgrid(x_fact, y_fact, indexing='ij')
   out_fft = x_comp * y_comp
 
-  # Multiply the nodal_fft by the transform of a.
+  # Multiply the nodal_fft by the transform of a. Each output frequency takes the
+  # coefficient spectrum at the same signed frequency reduced modulo the coefficient
+  # grid, so the whole multiplication is one gather rather than a nested loop over
+  # frequencies. This relies on n_large and m_large being odd, which 4*n+7 and 4*m+7
+  # always are: for an even size the Nyquist index would be reached from both sides.
+  row = _signed_frequencies(n_large) % a_n
+  column = _signed_frequencies(m_large) % a_m
+  def gather(transform):
+    return transform[np.ix_(row, column)]
   a_transform = np.fft.fft2(a_ext, norm='forward')
-  for i in range(n_large // 2 + 1):
-    for j in range(m_large // 2 + 1):
-      out_fft[i,j] = out_fft[i,j] * a_transform[i % a_n, j % a_m]
-      if i > 0:
-        out_fft[-i,j] = out_fft[-i,j] * a_transform[(-i) % a_n, j % a_m]
-      if j > 0: 
-        out_fft[i,-j] = out_fft[i,-j] * a_transform[i % a_n, (-j) % a_m]
-      if (i > 0) and (j > 0):
-        out_fft[-i,-j] = out_fft[-i,-j] * a_transform[(-i) % a_n, (-j) % a_m]
+  out_fft = out_fft * gather(a_transform)
 
   # For the off diagonal entries the boundary values must be handled specially in order to ensure precise antisymmetry.
   if off_diag:
@@ -282,23 +287,9 @@ def extend_coefficients(a, n, m, off_diag = False):
     vert_transform = np.fft.fft2(vertical_ext, norm='forward')
     corner_transform = np.fft.fft2(corner_ext, norm='forward')
     
-    for i in range(n_large // 2 + 1):
-      for j in range(m_large // 2 + 1):
-        out_fft[i,j] = out_fft[i,j] + horiz_fft[i,j] * horiz_transform[i % a_n, j % a_m]
-        out_fft[i,j] = out_fft[i,j] + vert_fft[i,j] * vert_transform[i % a_n, j % a_m]
-        out_fft[i,j] = out_fft[i,j] + corner_fft[i,j] * corner_transform[i % a_n, j % a_m]
-        if i > 0:
-          out_fft[-i,j] = out_fft[-i,j] + horiz_fft[-i,j] * horiz_transform[(-i) % a_n, j % a_m]
-          out_fft[-i,j] = out_fft[-i,j] + vert_fft[-i,j] * vert_transform[(-i) % a_n, j % a_m]
-          out_fft[-i,j] = out_fft[-i,j] + corner_fft[-i,j] * corner_transform[(-i) % a_n, j % a_m]
-        if j > 0:
-          out_fft[i,-j] = out_fft[i,-j] + horiz_fft[i,-j] * horiz_transform[i % a_n, (-j) % a_m]
-          out_fft[i,-j] = out_fft[i,-j] + vert_fft[i,-j] * vert_transform[i % a_n, (-j) % a_m]
-          out_fft[i,-j] = out_fft[i,-j] + corner_fft[i,-j] * corner_transform[i % a_n, (-j) % a_m]
-        if (i > 0) and (j > 0):
-          out_fft[-i,-j] = out_fft[-i,-j] + horiz_fft[-i,-j] * horiz_transform[(-i) % a_n, (-j) % a_m]
-          out_fft[-i,-j] = out_fft[-i,-j] + vert_fft[-i,-j] * vert_transform[(-i) % a_n, (-j) % a_m]
-          out_fft[-i,-j] = out_fft[-i,-j] + corner_fft[-i,-j] * corner_transform[(-i) % a_n, (-j) % a_m]
+    out_fft = out_fft + horiz_fft * gather(horiz_transform)
+    out_fft = out_fft + vert_fft * gather(vert_transform)
+    out_fft = out_fft + corner_fft * gather(corner_transform)
 
   # Extend the fft to a grid large enough for the product, with small prime factors.
   out_fft = extend_fft(out_fft, _next_fast_size(n_large), _next_fast_size(m_large))
