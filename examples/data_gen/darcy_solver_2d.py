@@ -222,6 +222,61 @@ def extend_coefficients(a, n, m, off_diag = False):
       if (i > 0) and (j > 0):
         out_fft[-i,-j] = out_fft[-i,-j] * a_transform[(-i) % a_n, (-j) % a_m]
 
+  # For the off diagonal entries the boundary values must be handled specially in order to ensure precise antisymmetry.
+  if off_diag:
+    horizontal_ext = np.zeros_like(a_ext)
+    horizontal_ext[0,1:a_m // 2] = a[0,1:-1]
+    horizontal_ext[0,a_m // 2 + 1:] = -1.0 * a[0,-2:0:-1]
+    horizontal_ext[a_n // 2, 1:a_m // 2] = -1.0 * a[-1,1:-1]
+    horizontal_ext[a_n // 2, a_m // 2 + 1:] = 1.0 * a[-1,-2:0:-1]
+
+    vertical_ext = np.zeros_like(a_ext)
+    vertical_ext[1:a_n // 2, 0] = a[1:-1,0]
+    vertical_ext[a_n // 2 + 1:, 0] = -1.0 * a[-2:0:-1,0]
+    vertical_ext[1:a_n // 2, a_m // 2] = -1.0 * a[1:-1,-1]
+    vertical_ext[a_n // 2 + 1:, a_m // 2] = 1.0 * a[-2:0:-1,-1]
+
+    corner_ext = np.zeros_like(a_ext)
+    corner_ext[0,0] = a[0,0]
+    corner_ext[0, a_m // 2] = -1.0 * a[0, -1]
+    corner_ext[a_n // 2, 0] = -1.0 * a[-1,0]
+    corner_ext[a_n // 2, a_m // 2] = a[-1,-1]
+
+    x_boundary = np.zeros_like(x_ind, dtype=complex)
+    x_boundary[1:] = a_n * a_n * (0.5j / (np.pi * np.pi * x_ind[1:] * x_ind[1:])) * np.sin(2.0 * np.pi * (x_ind[1:] / a_n)) - 1.0j * a_n / (np.pi * x_ind[1:])
+
+    y_boundary = np.zeros_like(y_ind, dtype=complex)
+    y_boundary[1:] = a_m * a_m * (0.5j / (np.pi * np.pi * y_ind[1:] * y_ind[1:])) * np.sin(2.0 * np.pi * (y_ind[1:] / a_m)) - 1.0j * a_m / (np.pi * y_ind[1:])
+
+    x_horiz, y_horiz = np.meshgrid(x_boundary, y_fact, indexing='ij')
+    horiz_fft = x_horiz * y_horiz
+    x_vert, y_vert = np.meshgrid(x_fact, y_boundary, indexing='ij')
+    vert_fft = x_vert * y_vert
+    x_corner, y_corner = np.meshgrid(x_boundary, y_boundary, indexing='ij')
+    corner_fft = x_corner * y_corner
+
+    horiz_transform = np.fft.fft2(horizontal_ext, norm='forward')
+    vert_transform = np.fft.fft2(vertical_ext, norm='forward')
+    corner_transform = np.fft.fft2(corner_ext, norm='forward')
+    
+    for i in range(n_large // 2 + 1):
+      for j in range(m_large // 2 + 1):
+        out_fft[i,j] = out_fft[i,j] + horiz_fft[i,j] * horiz_transform[i % a_n, j % a_m]
+        out_fft[i,j] = out_fft[i,j] + vert_fft[i,j] * vert_transform[i % a_n, j % a_m]
+        out_fft[i,j] = out_fft[i,j] + corner_fft[i,j] * corner_transform[i % a_n, j % a_m]
+        if i > 0:
+          out_fft[-i,j] = out_fft[-i,j] + horiz_fft[-i,j] * horiz_transform[(-i) % a_n, j % a_m]
+          out_fft[-i,j] = out_fft[-i,j] + vert_fft[-i,j] * vert_transform[(-i) % a_n, j % a_m]
+          out_fft[-i,j] = out_fft[-i,j] + corner_fft[-i,j] * corner_transform[(-i) % a_n, j % a_m]
+        if j > 0:
+          out_fft[i,-j] = out_fft[i,-j] + horiz_fft[i,-j] * horiz_transform[i % a_n, (-j) % a_m]
+          out_fft[i,-j] = out_fft[i,-j] + vert_fft[i,-j] * vert_transform[i % a_n, (-j) % a_m]
+          out_fft[i,-j] = out_fft[i,-j] + corner_fft[i,-j] * corner_transform[i % a_n, (-j) % a_m]
+        if (i > 0) and (j > 0):
+          out_fft[-i,-j] = out_fft[-i,-j] + horiz_fft[-i,-j] * horiz_transform[(-i) % a_n, (-j) % a_m]
+          out_fft[-i,-j] = out_fft[-i,-j] + vert_fft[-i,-j] * vert_transform[(-i) % a_n, (-j) % a_m]
+          out_fft[-i,-j] = out_fft[-i,-j] + corner_fft[-i,-j] * corner_transform[(-i) % a_n, (-j) % a_m]
+
   # Extend the fft to a grid of size a power of 2.
   out_fft = extend_fft(out_fft, _next_power_of_two(n_large), _next_power_of_two(m_large))
 
@@ -364,4 +419,5 @@ if __name__ == '__main__':
   f = np.ones((n, m))
   a = np.ones((3*n, 3*m))
   a[n:2*n, m:2*m] = 100
+  print(extend_coefficients(a, n, m, off_diag=True))
   u = uniform_grid_solver_scalar(a, f)
